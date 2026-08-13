@@ -1,0 +1,45 @@
+name: 'claimbook_etl'
+version: '1.0.0'
+config-version: 2
+
+# This points at the profile in profiles.yml (your DB connection).
+profile: 'claimbook'
+
+model-paths: ["models"]
+macro-paths: ["macros"]
+test-paths: ["tests"]
+
+# Where dbt writes its compiled SQL and run artifacts.
+target-path: "target"
+clean-targets:
+  - "target"
+  - "dbt_packages"
+
+# Default behaviour for every model, overridable per-folder or per-model.
+models:
+  claimbook_etl:
+    # Everything under models/reports/ gets materialized as a TABLE.
+    # Schema is intentionally NOT hardcoded here - it's controlled entirely
+    # by the active dbt target's "schema" setting in profiles.yml
+    # (dev -> cb_report, validate -> cb_report_validate, sandbox -> whatever
+    # your sandbox's staging schema is). This avoids dbt's default behavior
+    # of concatenating a model-level schema override with the target schema
+    # into an unexpected combined name.
+    reports:
+      +materialized: table
+
+# ---------------------------------------------------------------------------
+# Project-level variables.
+#
+# run_date: defaults to YESTERDAY, computed fresh on every invocation - not
+# a fixed date. This matches the convention established 2026-08-12 (see
+# docs/PROJECT_CONTEXT_ABI_Health_MASTER.md Section 17 Part C) for the
+# read-only validation scripts, and is applied here too so a bare `dbt run`
+# with no --vars does something sensible by default rather than silently
+# reusing a stale hardcoded date. In production, Airflow overrides this at
+# runtime with the DAG's own {{ ds }} (the actual run's logical date) - see
+# airflow_dags/preauth_manual_upload_daily_dag.py. This default only matters
+# for ad-hoc manual runs from the command line.
+# ---------------------------------------------------------------------------
+vars:
+  run_date: "{{ (modules.datetime.date.today() - modules.datetime.timedelta(days=1)).strftime('%Y-%m-%d') }}"

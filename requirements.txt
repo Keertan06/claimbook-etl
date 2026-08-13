@@ -1,0 +1,31 @@
+# Pinned to versions confirmed working together in this project as of
+# 2026-08-12. dbt and Airflow are both notorious for dependency conflicts
+# (Flask/Werkzeug/marshmallow version clashes especially) when installed
+# into the same environment - these exact versions are proven to coexist,
+# not just individually functional. Do not casually bump either without
+# testing both `dbt run` and `airflow scheduler` still start cleanly after.
+#
+# This project runs both dbt and Airflow from ONE shared virtualenv
+# (airflow_venv in every command example in this repo) - see SETUP.md for
+# why, and for the one alternative (separate venvs) if you'd rather avoid
+# the shared-environment fragility this implies.
+
+dbt-core==1.12.0
+dbt-postgres==1.11.0
+
+apache-airflow==2.10.3
+
+psycopg2-binary==2.9.12
+PyYAML>=6.0
+
+# Airflow's own constraints file is the authoritative source for its many
+# transitive dependencies (Flask, SQLAlchemy, etc.) - if `pip install -r
+# requirements.txt` alone produces dependency conflicts, install Airflow
+# with its constraints file instead, e.g.:
+#
+#   pip install "apache-airflow==2.10.3" psycopg2-binary PyYAML \
+#     --constraint "https://raw.githubusercontent.com/apache/airflow/constraints-2.10.3/constraints-3.12.txt"
+#   pip install dbt-core==1.12.0 dbt-postgres==1.11.0
+#
+# (adjust the constraints URL's Python version, e.g. constraints-3.11.txt,
+# to match your actual Python version - check with `python3 --version`)

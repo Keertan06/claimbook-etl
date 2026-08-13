@@ -1,0 +1,72 @@
+# =============================================================================
+# profiles.yml  -  ClaimbookDB (PostgreSQL) connection for dbt
+#
+# WHERE THIS GOES:
+#   dbt looks for this at  ~/.dbt/profiles.yml  by default, OR you can point
+#   at it explicitly with --profiles-dir (this project's convention - every
+#   command in this repo passes --profiles-dir pointing at this file's own
+#   directory, so dbt doesn't need a ~/.dbt/ copy at all).
+#
+#   Do NOT commit real credentials to Git. Every value below comes from an
+#   environment variable, so this file itself is safe to version-control -
+#   keep it that way. See .env.example for what to set.
+#
+# Fill in / export these before running:
+#   CLAIMBOOK_HOST, CLAIMBOOK_PORT, CLAIMBOOK_USER,
+#   CLAIMBOOK_PASSWORD, CLAIMBOOK_DBNAME
+# =============================================================================
+
+claimbook:
+  target: sandbox    # SAFE DEFAULT - your local sandbox. Never default this
+                      # to dev/validate/anything real-prod-adjacent.
+  outputs:
+
+    # Local sandbox - the one used for almost everything day to day: dbt
+    # test iteration, the manual end-to-end pipeline walkthrough, dbt docs.
+    # Fully disposable, fully write-capable, isolated from anything real.
+    sandbox:
+      type: postgres
+      host: "{{ env_var('CLAIMBOOK_HOST', 'localhost') }}"
+      port: "{{ env_var('CLAIMBOOK_PORT', '5433') | int }}"
+      user: "{{ env_var('CLAIMBOOK_USER', 'etl_user') }}"
+      password: "{{ env_var('CLAIMBOOK_PASSWORD') }}"
+      dbname: "{{ env_var('CLAIMBOOK_DBNAME', 'claimbook_sandbox') }}"
+      schema: cb_staging
+      threads: 4
+      keepalives_idle: 0
+      connect_timeout: 10
+
+    # Real ClaimbookDB - READ-ONLY validation only, until real dev/staging
+    # write access is granted (still not granted as of 2026-08-12 - see
+    # docs/PROJECT_CONTEXT_ABI_Health_MASTER.md Section 1, "the #1
+    # blocker"). Do not `dbt run` against this target - it would attempt to
+    # CREATE TABLE in real claimbook, which is a write. The validation/
+    # scripts in this repo bypass dbt entirely for exactly this reason -
+    # they run plain read-only SELECTs instead.
+    dev:
+      type: postgres
+      host: "{{ env_var('CLAIMBOOK_HOST', 'localhost') }}"
+      port: "{{ env_var('CLAIMBOOK_PORT', '5432') | int }}"
+      user: "{{ env_var('CLAIMBOOK_USER') }}"
+      password: "{{ env_var('CLAIMBOOK_PASSWORD') }}"
+      dbname: "{{ env_var('CLAIMBOOK_DBNAME', 'claimbook') }}"
+      schema: cb_report
+      threads: 4
+      keepalives_idle: 0
+      connect_timeout: 10
+
+    # A separate, safer target for the parallel-run validation phase against
+    # real data: writes to a scratch schema so you never touch real
+    # cb_reports tables until outputs are confirmed to match Talend. Same
+    # caveat as `dev` above applies - only usable once real write access
+    # exists at all.
+    validate:
+      type: postgres
+      host: "{{ env_var('CLAIMBOOK_HOST', 'localhost') }}"
+      port: "{{ env_var('CLAIMBOOK_PORT', '5432') | int }}"
+      user: "{{ env_var('CLAIMBOOK_USER') }}"
+      password: "{{ env_var('CLAIMBOOK_PASSWORD') }}"
+      dbname: "{{ env_var('CLAIMBOOK_DBNAME', 'claimbook') }}"
+      schema: cb_reports_validate
+      threads: 4
+      connect_timeout: 10

@@ -1,0 +1,63 @@
+# =============================================================================
+# NEVER COMMIT CREDENTIALS. This project has already had one real incident
+# (2026-08-10) where a sandbox password was briefly pushed in a profiles.yml
+# to a temporarily-public repo - see
+# docs/PROJECT_CONTEXT_ABI_Health_MASTER.md Section 1 for the full story.
+# profiles.yml itself is safe to commit (every value is env_var()-driven,
+# no literals) - but .env, any *_credentials* file, or any copy of
+# profiles.yml with real values hand-typed in for "just testing" is NOT.
+# If you ever do this by accident: rotate the password immediately, don't
+# just remove the commit - git history keeps it. Rewriting history isn't
+# enough either if the repo was ever public even briefly - assume it's
+# compromised and rotate.
+# =============================================================================
+
+.env
+.env.*
+!.env.example
+*credentials*
+*secrets*
+
+# dbt
+target/
+dbt_packages/
+logs/
+.user.yml
+
+# dbt's partial-parse cache is a real, proven gotcha in this project - it
+# survived a machine restart once and masked a genuinely-fixed file (see
+# docs Section 17 Part G). Not committing it also avoids that ever
+# happening via git (e.g. someone else's cache from a different schema.yml
+# version landing in your checkout).
+partial_parse.msgpack
+
+# Airflow
+airflow.db
+airflow.cfg
+airflow-webserver.pid
+standalone_admin_password.txt
+webserver_config.py
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+venv/
+airflow_venv/
+*.egg-info/
+
+# Validation script outputs - these contain real production data pulled
+# during testing (claim IDs, tenant names, row counts). Not credentials,
+# but also not something to casually commit - regenerate them by re-running
+# the script instead.
+scale_test_*.csv
+parity_results*.csv
+full_count_*.csv
+*_results.csv
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
