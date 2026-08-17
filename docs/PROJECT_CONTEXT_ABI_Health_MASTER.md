@@ -100,12 +100,17 @@ background — I am learning this stack by building it.
 
 # SECTION 1 — CURRENT STATE (where we actually are right now)
 
-**Last major session: 2026-08-11 — corrected a wrong root-cause theory from
-2026-08-10 (the "duplicate inserts from reruns" explanation), verified the
-real explanation against raw source data, and began real-tenant scale
-validation. Full detail in Section 16. Prior major session: 2026-08-10, the
-four items open after the 2026-08-07 multi-tenant build — full detail in
-Section 15.**
+**Last major session: 2026-08-17 — ran the first genuine `dbt run` (not a
+script standing in for it) against real production-sourced data, via a new
+sandbox-bridge tool, and confirmed the result matches Claimbook and diverges
+from Talend on real claims. Also adopted a two-terminal working pattern after
+two near-misses where `dbt run` was accidentally pointed at real prod. Full
+detail in Section 18. Prior major session: 2026-08-11 — corrected a wrong
+root-cause theory from 2026-08-10 (the "duplicate inserts from reruns"
+explanation), verified the real explanation against raw source data, and
+began real-tenant scale validation. Full detail in Section 16. Prior major
+session: 2026-08-10, the four items open after the 2026-08-07 multi-tenant
+build — full detail in Section 15.**
 
 ## What is DONE and PROVEN (actually executed, not just written)
 
@@ -331,6 +336,38 @@ Section 15.**
   whole project: why it's happening, what was built, where each test ran,
   and the results in plain terms. Given to Keertan as a deliverable, not
   stored in this context file.
+- ✅ **First real `dbt run` against real production-sourced data** (2026-08-17,
+  Section 18) — via a new bridge tool (`copy_claim_to_sandbox.py`) that
+  copies one real claim's current Claimbook data plus its real Talend
+  snapshot into the sandbox, read-only on the prod side, so an actual
+  `dbt run` (not `full_byte_comparison.py`'s script-derived equivalent) can
+  execute against it. Two real claims proven this way (255841, 255920,
+  tenant 36, 2026-08-11): real dbt output matches current Claimbook exactly
+  on every field; Talend's stored snapshot diverges on the same
+  mutability-affected fields already characterized in Section 16/17
+  (`al_number`, `insurance_policy_number`, `first_name`).
+- ✅ **`manual_upload_completed_actual_tat` null-string quirk characterized**
+  (2026-08-17, Section 18) — Talend stores "no value" for this column as
+  the literal text string `'null'` (confirmed via `pg_typeof`), not a real
+  SQL NULL; our pipeline correctly produces a real NULL. Affected 20/72
+  rows (28%) for tenant 36, 2026-08-11. Cosmetic, not a correctness bug.
+- ✅ **Mutability pattern confirmed to extend beyond
+  `manual_upload_completed_time`** (2026-08-17, Section 18) — `al_number`,
+  `insurance_policy_number`, and `first_name` are also editable after
+  Talend's original capture. All 8 non-null-quirk mismatches from
+  `full_byte_comparison.py`'s first real production run (tenant 36,
+  2026-08-11) were individually traced to raw source and found to match
+  current Claimbook exactly, with Talend holding the stale value. One
+  instance of live mutation was directly observed mid-session (claim
+  255920's `al_number` changed between two queries minutes apart).
+- ⚠️ **Two-terminal working pattern adopted as standing practice**
+  (2026-08-17, Section 18) — after `dbt run --target sandbox` was
+  accidentally executed twice against real production (caught both times
+  only because prod itself enforces read-only at the connection level, not
+  by design safeguard). One terminal is now dedicated to prod only
+  (read-only queries), a second to sandbox only (all `dbt run`
+  invocations). Always echo host/dbname vars before running anything in
+  either.
 
 ## Immediate next steps (in order)
 
@@ -342,7 +379,9 @@ Section 15.**
    informational.
 2. Get dev/staging write access (meeting prep doc exists for this) — still
    the #1 real blocker for anything beyond read-only validation and manual
-   sandbox testing.
+   sandbox testing. The Section 18 real-`dbt run` proof (via the sandbox
+   bridge) is new evidence to bring to that conversation, in addition to
+   the existing byte-comparison and scale-test results.
 3. Once the CLAIMS job query arrives: begin converting it using the now
    twice-proven pattern (macro + model + loader + DAG + real tests +
    explicit row order).
@@ -353,6 +392,10 @@ Section 15.**
    confirmed on, if it becomes relevant (e.g. before final cutover
    sign-off) — currently proven correct on real data for one tenant
    (dmh/36), not yet checked at scale like the count-based tests were.
+6. Extend `copy_claim_to_sandbox.py` usage to more real claims if further
+   real-`dbt run` proof points are useful, or use it to reproduce/root-cause
+   any future mismatch found via `full_byte_comparison.py` — it now exists
+   as a reusable tool, not a one-off.
 
 ---
 
@@ -2542,6 +2585,178 @@ scratch:
    forced a full re-parse and resolved it. The restart doesn't clear this
    cache (it's just a file), so a stale parse from *before* the restart
    can persist and mask a genuinely-updated file after it.
+
+---
+
+# SECTION 18 — REAL `dbt run` PROOF AGAINST REAL PRODUCTION-SOURCED DATA (2026-08-17)
+
+## Context
+
+Section 17 validated the pipeline using `full_byte_comparison.py`, which
+independently re-implements the model's join logic in Python rather than
+running dbt itself — necessary because real dev/staging write access to
+Claimbook is still not granted (Section 1, standing blocker). This left an
+open question: does a *real* `dbt run` — not a script standing in for it —
+actually produce the same result?
+
+This session closes that gap for two specific real claims, without
+requiring real prod write access, by building a bridge tool that copies
+real (read-only) prod data into the sandbox, where dbt already has full
+write access.
+
+## New tool: `validation/copy_claim_to_sandbox.py`
+
+Standalone script, not part of dbt. Copies ONE real claim's data at a time
+from real production (`claimbook` + `cb_reports`, read-only) into the
+sandbox (`claimbook_sandbox`, writable) — both the real current Claimbook
+row (`oltp_person` / `oltp_patient_tb` / `oltp_insurance_policy` /
+`oltp_pre_authorisation` / `oltp_preauth_status`) and the real historical
+Talend snapshot (`cb_report.manual_report` on prod →
+`cb_report.preauth_manual_upload_daily` on sandbox — **note the table name
+differs between environments**, confirmed via `\dt cb_report.*` on prod).
+
+Safety model:
+- Source connections are opened `readonly=True` at the Postgres session
+  level — structurally cannot write to prod, same pattern as
+  `full_byte_comparison.py`.
+- Target (sandbox) uses a **deliberately separate env var prefix**
+  (`SANDBOX_*`, not `CLAIMBOOK_*`) so it can never be confused with prod
+  vars — this was a direct response to a near-miss during this session
+  (see "Two-terminal incident" below).
+- Defaults to `--dry-run` (prints the exact plan, no writes). Requires
+  explicit `--execute` to write anything.
+- One claim per run only. No bulk/loop mode — this is a demonstration/
+  debugging tool, not a migration tool.
+
+Located at `validation/copy_claim_to_sandbox.py` in the repo.
+
+## Permissions required in sandbox (new)
+
+`etl_user` needed explicit grants that weren't previously in place:
+```sql
+GRANT INSERT, UPDATE ON dmh.oltp_person, dmh.oltp_patient_tb,
+  dmh.oltp_insurance_policy, dmh.oltp_pre_authorisation,
+  dmh.oltp_preauth_status TO etl_user;
+```
+Note: **both INSERT and UPDATE are required**, even for insert-only
+workflows, because the script uses `ON CONFLICT ... DO UPDATE` — Postgres
+checks UPDATE privilege on that clause even when no conflict occurs. This
+cost one failed run before being caught.
+
+Also confirmed: raw `dmh`/tenant-schema tables in sandbox are **read-only
+by default** even to `etl_user` — only `cb_staging.manual_report_staged`
+and `cb_report.preauth_manual_upload_daily` (the dbt/Talend output-side
+tables) had default write access. This wasn't previously documented and
+is a deliberate-looking safeguard (prevents accidental corruption of
+fixture data dbt tests run against) rather than an oversight — worth
+knowing if this comes up again.
+
+## Two-terminal working pattern (new standing practice)
+
+This session repeatedly hit a real risk: a single terminal's exported
+`CLAIMBOOK_*` env vars got reused across both prod and sandbox work,
+because both environments use the *same* variable names
+(`CLAIMBOOK_HOST` etc.), just with different values.
+
+**Real incident, twice in this session:** `dbt run --target sandbox` was
+executed in a terminal that still had prod's `CLAIMBOOK_HOST=4.213.181.70`
+exported. dbt attempted `CREATE SCHEMA` against real production. Both
+times, the only thing that prevented an actual write to prod was that
+prod itself is enforcing read-only at the connection level — not
+something to rely on as a safeguard going forward.
+
+**Fix adopted:** two separate, dedicated WSL terminals for the rest of
+this project:
+- **Terminal 1 — PROD only.** `CLAIMBOOK_HOST=4.213.181.70`,
+  `CLAIMBOOK_DBNAME=claimbook`, `CBREPORTS_*` set to real prod. Used for
+  all read-only queries and validation scripts against real data. Never
+  run `dbt run` here.
+- **Terminal 2 — SANDBOX only.** `CLAIMBOOK_HOST=172.29.32.1` (gateway
+  IP), `CLAIMBOOK_DBNAME=claimbook_sandbox`. Used for all `dbt run`
+  invocations and any sandbox writes.
+
+Before running anything in either terminal, echo the relevant host/dbname
+vars first and visually confirm before proceeding — this is now a hard
+rule, not a courtesy check, given the two near-misses above.
+
+`copy_claim_to_sandbox.py` is the one exception that legitimately needs
+both prod and sandbox vars in the same terminal (source = prod read-only,
+target = sandbox writable) — it uses the separate `SANDBOX_*` prefix
+specifically so this dual-context terminal can't accidentally point dbt
+itself at prod.
+
+## Other findings from this session
+
+- **`manual_upload_completed_actual_tat` null-string quirk (new,
+  confirmed systematic):** Talend's real stored output represents "no
+  value" for this column as the literal 4-character text string `'null'`
+  (confirmed via `pg_typeof()` — column is `text`), not a real SQL NULL.
+  Our pipeline correctly produces a real NULL. Affected 20/72 rows for
+  tenant 36 on 2026-08-11 (28%). Cosmetic, not a correctness bug — flagged
+  for a product decision on whether to replicate Talend's representation,
+  not urgent.
+
+- **Mutability pattern confirmed to extend beyond
+  `manual_upload_completed_time`:** `al_number`,
+  `insurance_policy_number`, and `first_name` are also editable after
+  Talend's original capture. All 8 non-null-quirk mismatches found via
+  `full_byte_comparison.py` for tenant 36 / 2026-08-11 were independently
+  verified: in every case, our converted output matched **current** raw
+  Claimbook exactly, and Talend's stored value was the stale one.
+  Verified via direct `psql` queries tracing the real join chain
+  (`oltp_pre_authorisation` → `oltp_patient_tb` → `oltp_person`, and →
+  `oltp_insurance_policy`).
+
+- **Live mutation caught mid-session:** claim 255920's `al_number`
+  changed from `110101043006` to `110101043006-1` between two queries run
+  minutes apart in this same session — a real-time, directly-observed
+  instance of the mutability pattern, not just an inference from
+  Talend-vs-now comparison.
+
+- **`full_byte_comparison.py` first real production run (tenant 36,
+  2026-08-11, 72 rows):** 53/72 exact match, 11/72 the null-string quirk,
+  8/72 genuine mutability-explained differences, 0/72 unexplained
+  pipeline errors.
+
+- **dbt `run_date` var defaults to yesterday, computed fresh** (see
+  `dbt_project.yml`) — for any historical/backfill-style run, it must be
+  explicitly overridden: `dbt run --select manual_report_staged --target
+  sandbox --vars '{"run_date": "YYYY-MM-DD"}'`. Running without this
+  against an old date silently returns 0 rows (the model's `WHERE
+  ps.manual_upload_completed_time::date = run_date` filter excludes
+  everything), not an error — worth remembering, this cost one confusing
+  zero-row result before being traced.
+
+## Real dbt run results (genuine `dbt run`, not script-derived)
+
+Two real production claims (tenant 36, run_date 2026-08-11) copied via
+`copy_claim_to_sandbox.py --execute`, then processed by an actual
+`dbt run --select manual_report_staged --target sandbox --vars
+'{"run_date": "2026-08-11"}'` execution (`SELECT 2` — both rows
+materialized):
+
+| Claim ID | Field | dbt output (real `dbt run`) | Talend (real snapshot) |
+|---|---|---|---|
+| 255841 | first_name | `Mr. SALUNKHE PRAKASH MARUTI` | `PRAKASH SALUNKHE` |
+| 255841 | al_number | `110202560518-1` | `110202560518` |
+| 255841 | insurance_policy_number | `4016/X/157974480/07/000` | `4016/X/157974480/07/000` (matches) |
+| 255920 | first_name | `Miss. THOSAR KETAKI MILIND` | `Miss. THOSAR KETAKI MILIND` (matches) |
+| 255920 | al_number | `110101043006-1` | `110101042925` |
+| 255920 | insurance_policy_number | `4128I/HSNR/403817432/00/000` | `4128i/HSNR/403817432/01/000` |
+
+This is the first session-confirmed instance of a genuine `dbt run`
+(not a script re-implementation) processing real production-sourced data
+end to end, with output independently verified against both the real raw
+source and the real Talend snapshot.
+
+## Status update
+
+- Real dev/staging write access to `claimbook`/`cb_reports` — still not
+  granted, still the #1 blocker for running dbt directly against prod.
+  This session's sandbox-bridge approach is a workaround, not a
+  replacement for that access.
+- `copy_claim_to_sandbox.py` is reusable for any future claim needing
+  this same real-dbt-run proof, without needing prod write access.
 
 ---
 
